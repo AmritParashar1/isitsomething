@@ -94,16 +94,10 @@ export default function TodayPage() {
               Generate
             </button>
             {schedule && !schedule.isCommitted && (
-              <>
-                <button className="btn btn-secondary btn-sm" onClick={reschedule} disabled={rescheduling}>
-                  {rescheduling ? <span className="spinner" style={{ width: 14, height: 14 }} /> : <RefreshCw size={13} />}
-                  Replan
-                </button>
-                <button className="btn btn-primary btn-sm" onClick={commit} disabled={committing}>
-                  {committing ? <span className="spinner" style={{ width: 14, height: 14 }} /> : <CheckCircle2 size={13} />}
-                  Commit
-                </button>
-              </>
+              <button className="btn btn-primary btn-sm" onClick={commit} disabled={committing}>
+                {committing ? <span className="spinner" style={{ width: 14, height: 14 }} /> : <CheckCircle2 size={13} />}
+                Commit
+              </button>
             )}
             {schedule?.isCommitted && (
               <div className="committed-badge">

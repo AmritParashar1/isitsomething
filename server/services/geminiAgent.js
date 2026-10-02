@@ -516,7 +516,8 @@ CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
 - Whenever the user asks for or agrees to specific timings (e.g. "DSA from 10:30 PM", "take a walk from 10:00 to 10:30", "push bedtime to 2 AM"), you MUST call the set_schedule_blocks tool with the actual block objects (title, startTime, endTime, durationMinutes, type, taskId if matching an existing task).
 - NEVER just print a markdown schedule table in your text reply without calling set_schedule_blocks or generate_daily_schedule. If you do not call the tool, the database and user's visual timeline will NOT update!
 - When the user confirms with "yes", "lock it in", or asks to commit, call set_schedule_blocks with isCommitted: true or call commit_schedule.
-- When the user mentions fixed events (walks, meetings, dinners), use add_commitment or include them as commitment/break blocks in set_schedule_blocks.
+- DO NOT create standalone 'break' blocks unless the user explicitly asks for one. Keep the schedule clean, containing only actual tasks and commitments (breaks naturally exist in the gap between blocks).
+- When the user mentions fixed events (walks, meetings, dinners), use add_commitment or include them as commitment blocks in set_schedule_blocks.
 - When the user gives you tasks, use add_task.
 - Always get_current_schedule before making modifications.
 - ALWAYS log_schedule_event BEFORE calling reschedule_day when reporting a miss/skip.
