@@ -1,4 +1,4 @@
-const Groq = require('groq-sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Task = require('../models/Task');
 const Commitment = require('../models/Commitment');
 const DailySchedule = require('../models/DailySchedule');
@@ -7,233 +7,185 @@ const Conversation = require('../models/Conversation');
 const User = require('../models/User');
 const { generateSchedule } = require('./scheduler');
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 
-// ─── Tool definitions (OpenAI function-calling format) ───────────────────────
+// ─── Tool definitions (Gemini FunctionDeclaration format) ────────────────────
 
-const tools = [
+// Tool declarations in Gemini FunctionDeclaration format
+const functionDeclarations = [
   {
-    type: 'function',
-    function: {
-      name: 'get_user_preferences',
-      description: 'Retrieve the user\'s planning preferences (work hours, break durations, reminder settings).',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
+    name: 'get_user_preferences',
+    description: 'Retrieve the user\'s planning preferences (work hours, break durations, reminder settings).',
+    parameters: { type: 'OBJECT', properties: {}, required: [] },
   },
   {
-    type: 'function',
-    function: {
-      name: 'get_today_tasks',
-      description: 'Retrieve all tasks for today (pending, scheduled, in_progress). Optionally filter by date.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
-        },
-        required: [],
+    name: 'get_today_tasks',
+    description: 'Retrieve all tasks for today (pending, scheduled, in_progress). Optionally filter by date.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING', description: 'YYYY-MM-DD, defaults to today' },
       },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'get_daily_availability',
-      description: 'Retrieve fixed commitments and free windows for a given date.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
-        },
-        required: [],
+    name: 'get_daily_availability',
+    description: 'Retrieve fixed commitments and free windows for a given date.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING', description: 'YYYY-MM-DD, defaults to today' },
       },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'get_current_schedule',
-      description: 'Retrieve the latest daily schedule for a given date.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
-        },
-        required: [],
+    name: 'get_current_schedule',
+    description: 'Retrieve the latest daily schedule for a given date.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING', description: 'YYYY-MM-DD, defaults to today' },
       },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'add_task',
-      description: 'Add a new task requested by the user. Call once per task.',
-      parameters: {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          estimatedDuration: { type: 'number', description: 'Duration in minutes' },
-          priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
-          mustDo: { type: 'boolean' },
-          deadline: { type: 'string', description: 'ISO date string, optional' },
-          notes: { type: 'string' },
-          scheduledDate: { type: 'string', description: 'YYYY-MM-DD' },
+    name: 'add_task',
+    description: 'Add a new task requested by the user. Call once per task.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING' },
+        estimatedDuration: { type: 'NUMBER', description: 'Duration in minutes' },
+        priority: { type: 'STRING', description: 'low, medium, high, or urgent' },
+        mustDo: { type: 'BOOLEAN' },
+        deadline: { type: 'STRING', description: 'ISO date string, optional' },
+        notes: { type: 'STRING' },
+        scheduledDate: { type: 'STRING', description: 'YYYY-MM-DD' },
+      },
+      required: ['title', 'estimatedDuration'],
+    },
+  },
+  {
+    name: 'update_task',
+    description: 'Update an existing task\'s details or status.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        taskId: { type: 'STRING' },
+        updates: {
+          type: 'OBJECT',
+          properties: {
+            title: { type: 'STRING' },
+            estimatedDuration: { type: 'NUMBER' },
+            priority: { type: 'STRING' },
+            mustDo: { type: 'BOOLEAN' },
+            status: { type: 'STRING' },
+            notes: { type: 'STRING' },
+          },
         },
-        required: ['title', 'estimatedDuration'],
+      },
+      required: ['taskId', 'updates'],
+    },
+  },
+  {
+    name: 'generate_daily_schedule',
+    description: 'Invoke the scheduling engine to create a time-blocked schedule from today\'s tasks and commitments.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING', description: 'YYYY-MM-DD' },
       },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'update_task',
-      description: 'Update an existing task\'s details or status.',
-      parameters: {
-        type: 'object',
-        properties: {
-          taskId: { type: 'string' },
-          updates: {
-            type: 'object',
+    name: 'commit_schedule',
+    description: 'Save the current schedule as the committed baseline. ONLY call after explicit user confirmation.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING', description: 'YYYY-MM-DD' },
+      },
+    },
+  },
+  {
+    name: 'log_schedule_event',
+    description: 'Log a miss, skip, early completion, or other event BEFORE replanning.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        eventType: { type: 'STRING', description: 'missed, skipped, completed_early, added_task, availability_change, manual_edit, or deferred' },
+        taskId: { type: 'STRING', description: 'Task ID, if applicable' },
+        blockTitle: { type: 'STRING' },
+        reason: { type: 'STRING', description: 'Optional user-provided reason' },
+        date: { type: 'STRING' },
+      },
+      required: ['eventType'],
+    },
+  },
+  {
+    name: 'reschedule_day',
+    description: 'Recalculate the remaining schedule after logging an event. Preserves completed blocks.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING' },
+      },
+    },
+  },
+  {
+    name: 'set_schedule_blocks',
+    description: 'Directly create or update the daily schedule with custom blocks and timings. CRITICAL: You MUST call this tool whenever the user requests or agrees to specific block timings. Never just write text in your reply without calling this tool, otherwise the visual timeline will NOT update.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING', description: 'YYYY-MM-DD, defaults to today' },
+        blocks: {
+          type: 'ARRAY',
+          description: 'The complete list of schedule blocks in chronological order',
+          items: {
+            type: 'OBJECT',
             properties: {
-              title: { type: 'string' },
-              estimatedDuration: { type: 'number' },
-              priority: { type: 'string' },
-              mustDo: { type: 'boolean' },
-              status: { type: 'string' },
-              notes: { type: 'string' },
+              title: { type: 'STRING' },
+              type: { type: 'STRING', description: 'task, commitment, break, or buffer' },
+              startTime: { type: 'STRING', description: 'HH:MM in 24-hour format' },
+              endTime: { type: 'STRING', description: 'HH:MM in 24-hour format' },
+              durationMinutes: { type: 'NUMBER' },
+              taskId: { type: 'STRING', description: 'Task ID if associated with an existing task' },
+              isFixed: { type: 'BOOLEAN' },
+              color: { type: 'STRING' },
             },
+            required: ['title', 'startTime', 'endTime', 'durationMinutes'],
           },
         },
-        required: ['taskId', 'updates'],
+        isCommitted: { type: 'BOOLEAN', description: 'True if user explicitly asked to lock/commit this schedule' },
+        note: { type: 'STRING' },
       },
+      required: ['blocks'],
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'generate_daily_schedule',
-      description: 'Invoke the scheduling engine to create a time-blocked schedule from today\'s tasks and commitments.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'YYYY-MM-DD' },
-        },
-        required: [],
+    name: 'add_commitment',
+    description: 'Add a fixed commitment (e.g. meeting, walk, doctor appointment) for a specific time.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING' },
+        startTime: { type: 'STRING', description: 'HH:MM in 24-hour format' },
+        endTime: { type: 'STRING', description: 'HH:MM in 24-hour format' },
+        date: { type: 'STRING', description: 'YYYY-MM-DD, defaults to today' },
+        notes: { type: 'STRING' },
       },
+      required: ['title', 'startTime', 'endTime'],
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'commit_schedule',
-      description: 'Save the current schedule as the committed baseline. ONLY call after explicit user confirmation.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'YYYY-MM-DD' },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'log_schedule_event',
-      description: 'Log a miss, skip, early completion, or other event BEFORE replanning.',
-      parameters: {
-        type: 'object',
-        properties: {
-          eventType: {
-            type: 'string',
-            enum: ['missed', 'skipped', 'completed_early', 'added_task', 'availability_change', 'manual_edit', 'deferred'],
-          },
-          taskId: { type: 'string', description: 'Task ID, if applicable' },
-          blockTitle: { type: 'string' },
-          reason: { type: 'string', description: 'Optional user-provided reason' },
-          date: { type: 'string' },
-        },
-        required: ['eventType'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'reschedule_day',
-      description: 'Recalculate the remaining schedule after logging an event. Preserves completed blocks.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string' },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'set_schedule_blocks',
-      description: 'Directly create or update the daily schedule with custom blocks and timings. CRITICAL: You MUST call this tool whenever the user requests or agrees to specific block timings (e.g. "start DSA at 10:30 PM", "take a walk from 10:00 to 10:30"). Never just write text in your reply without calling this tool, otherwise the visual timeline will NOT update.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
-          blocks: {
-            type: 'array',
-            description: 'The complete list of schedule blocks for the day in chronological order',
-            items: {
-              type: 'object',
-              properties: {
-                title: { type: 'string' },
-                type: { type: 'string', enum: ['task', 'commitment', 'break', 'buffer'] },
-                startTime: { type: 'string', description: 'HH:MM in 24-hour format, e.g. 22:30, 00:40' },
-                endTime: { type: 'string', description: 'HH:MM in 24-hour format, e.g. 00:30, 01:40' },
-                durationMinutes: { type: 'number' },
-                taskId: { type: 'string', description: 'Task ID if associated with an existing task' },
-                isFixed: { type: 'boolean' },
-                color: { type: 'string' },
-              },
-              required: ['title', 'startTime', 'endTime', 'durationMinutes'],
-            },
-          },
-          isCommitted: { type: 'boolean', description: 'True if user explicitly asked to lock/commit this schedule' },
-          note: { type: 'string' },
-        },
-        required: ['blocks'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'add_commitment',
-      description: 'Add a fixed commitment (e.g. meeting, walk, doctor appointment) for a specific time.',
-      parameters: {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          startTime: { type: 'string', description: 'HH:MM in 24-hour format' },
-          endTime: { type: 'string', description: 'HH:MM in 24-hour format' },
-          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
-          notes: { type: 'string' },
-        },
-        required: ['title', 'startTime', 'endTime'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_progress_summary',
-      description: 'Get planned vs actual progress for a date.',
-      parameters: {
-        type: 'object',
-        properties: {
-          date: { type: 'string' },
-        },
-        required: [],
+    name: 'get_progress_summary',
+    description: 'Get planned vs actual progress for a date.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        date: { type: 'STRING' },
       },
     },
   },
@@ -510,7 +462,7 @@ async function runAgent(userId, userMessage, date) {
     conversation = await Conversation.create({ userId, date: today, messages: [] });
   }
 
-  const systemPrompt = `You are an AI daily planning assistant. Your job is to help the user plan, manage, and adapt their daily schedule.
+  const systemInstruction = `You are an AI daily planning assistant. Your job is to help the user plan, manage, and adapt their daily schedule.
 
 CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
 - Whenever the user asks for or agrees to specific timings (e.g. "DSA from 10:30 PM", "take a walk from 10:00 to 10:30", "push bedtime to 2 AM"), you MUST call the set_schedule_blocks tool with the actual block objects (title, startTime, endTime, durationMinutes, type, taskId if matching an existing task).
@@ -524,59 +476,42 @@ CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
 - Be concise, friendly, and practical.
 - Today's date is ${today}.`;
 
-  // Build message history
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    ...conversation.messages.map(m => ({ role: m.role === 'model' ? 'assistant' : m.role, content: m.content })),
-    { role: 'user', content: userMessage },
-  ];
-
-  // Save user message
-  conversation.messages.push({ role: 'user', content: userMessage });
-
   const toolCallsMade = [];
 
-  // Agentic loop
-  let continueLoop = true;
-  while (continueLoop) {
-    const response = await groq.chat.completions.create({
-      model: MODEL,
-      messages,
-      tools,
-      tool_choice: 'auto',
-      temperature: 0.6,
-    });
+  const model = genAI.getGenerativeModel({
+    model: MODEL,
+    systemInstruction,
+    tools: [{ functionDeclarations }],
+    generationConfig: { temperature: 0.4 },
+  });
 
-    const choice = response.choices[0];
-    const assistantMsg = choice.message;
+  // Build the contents array for generateContent directly
+  // (avoids SDK's internal 'function' role issues with startChat)
+  const contents = conversation.messages
+    .filter(m => (m.role === 'user' || m.role === 'model') && m.content && m.content.trim())
+    .map(m => ({
+      role: m.role === 'model' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
 
-    // Add assistant message to history
-    messages.push(assistantMsg);
+  // Add the current user message
+  contents.push({ role: 'user', parts: [{ text: userMessage }] });
 
-    if (choice.finish_reason === 'tool_calls' && assistantMsg.tool_calls?.length > 0) {
-      // Execute all tool calls
-      const toolResultMessages = [];
+  // Save user message to conversation
+  conversation.messages.push({ role: 'user', content: userMessage });
 
-      for (const toolCall of assistantMsg.tool_calls) {
-        let args = {};
-        try { args = JSON.parse(toolCall.function.arguments || '{}'); } catch {}
+  // Agentic loop using generateContent directly
+  while (true) {
+    const result = await model.generateContent({ contents });
+    const response = result.response;
+    const candidate = response.candidates[0];
+    const parts = candidate.content.parts;
 
-        const result = await executeTool(toolCall.function.name, args, userId);
-        toolCallsMade.push({ name: toolCall.function.name, args, result });
+    const fnCalls = parts.filter(p => p.functionCall);
 
-        toolResultMessages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
-        });
-      }
-
-      // Add all tool results to message history
-      messages.push(...toolResultMessages);
-    } else {
-      // No more tool calls — we have the final answer
-      continueLoop = false;
-      const assistantText = assistantMsg.content || '';
+    if (fnCalls.length === 0) {
+      // Final text answer — no more tool calls
+      const assistantText = response.text();
 
       conversation.messages.push({
         role: 'model',
@@ -587,6 +522,27 @@ CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
 
       return { message: assistantText, toolCalls: toolCallsMade };
     }
+
+    // Add the model's function-call turn to contents
+    contents.push({ role: 'model', parts });
+
+    // Execute all function calls and collect results
+    const functionResponseParts = [];
+    for (const part of fnCalls) {
+      const { name, args } = part.functionCall;
+      const toolResult = await executeTool(name, args || {}, userId);
+      toolCallsMade.push({ name, args, result: toolResult });
+
+      functionResponseParts.push({
+        functionResponse: {
+          name,
+          response: { content: JSON.stringify(toolResult) },
+        },
+      });
+    }
+
+    // Add function results as a user turn and loop again
+    contents.push({ role: 'user', parts: functionResponseParts });
   }
 }
 
