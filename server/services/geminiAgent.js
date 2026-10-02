@@ -174,6 +174,58 @@ const tools = [
   {
     type: 'function',
     function: {
+      name: 'set_schedule_blocks',
+      description: 'Directly create or update the daily schedule with custom blocks and timings. CRITICAL: You MUST call this tool whenever the user requests or agrees to specific block timings (e.g. "start DSA at 10:30 PM", "take a walk from 10:00 to 10:30"). Never just write text in your reply without calling this tool, otherwise the visual timeline will NOT update.',
+      parameters: {
+        type: 'object',
+        properties: {
+          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
+          blocks: {
+            type: 'array',
+            description: 'The complete list of schedule blocks for the day in chronological order',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                type: { type: 'string', enum: ['task', 'commitment', 'break', 'buffer'] },
+                startTime: { type: 'string', description: 'HH:MM in 24-hour format, e.g. 22:30, 00:40' },
+                endTime: { type: 'string', description: 'HH:MM in 24-hour format, e.g. 00:30, 01:40' },
+                durationMinutes: { type: 'number' },
+                taskId: { type: 'string', description: 'Task ID if associated with an existing task' },
+                isFixed: { type: 'boolean' },
+                color: { type: 'string' },
+              },
+              required: ['title', 'startTime', 'endTime', 'durationMinutes'],
+            },
+          },
+          isCommitted: { type: 'boolean', description: 'True if user explicitly asked to lock/commit this schedule' },
+          note: { type: 'string' },
+        },
+        required: ['blocks'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_commitment',
+      description: 'Add a fixed commitment (e.g. meeting, walk, doctor appointment) for a specific time.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          startTime: { type: 'string', description: 'HH:MM in 24-hour format' },
+          endTime: { type: 'string', description: 'HH:MM in 24-hour format' },
+          date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
+          notes: { type: 'string' },
+        },
+        required: ['title', 'startTime', 'endTime'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_progress_summary',
       description: 'Get planned vs actual progress for a date.',
       parameters: {
@@ -384,6 +436,64 @@ async function executeTool(name, args, userId) {
       };
     }
 
+    case 'set_schedule_blocks': {
+      const existingSchedule = await DailySchedule.findOne({ userId, date }).sort({ version: -1 });
+      const committedBaseline = await DailySchedule.findOne({ userId, date, isCommitted: true });
+      const version = (existingSchedule?.version || 0) + 1;
+
+      const totalScheduled = args.blocks.reduce((acc, b) => acc + (b.durationMinutes || 0), 0);
+
+      const formattedBlocks = args.blocks.map(b => ({
+        taskId: b.taskId || null,
+        title: b.title,
+        type: b.type || (b.taskId ? 'task' : 'break'),
+        startTime: b.startTime,
+        endTime: b.endTime,
+        durationMinutes: b.durationMinutes,
+        status: b.status || 'pending',
+        color: b.color || (b.type === 'commitment' ? '#8b5cf6' : b.type === 'break' ? '#374151' : '#6366f1'),
+        isFixed: !!b.isFixed || b.type === 'commitment',
+      }));
+
+      const schedule = await DailySchedule.create({
+        userId,
+        date,
+        version,
+        type: args.isCommitted ? 'committed' : (committedBaseline ? 'revision' : 'proposal'),
+        isCommitted: !!args.isCommitted,
+        committedAt: args.isCommitted ? new Date() : null,
+        baselineScheduleId: committedBaseline?._id || null,
+        blocks: formattedBlocks,
+        totalScheduledMinutes: totalScheduled,
+        totalAvailableMinutes: 1440,
+        generationNote: args.note || 'Custom schedule updated by AI assistant',
+      });
+
+      for (const block of formattedBlocks) {
+        if (block.taskId) {
+          await Task.findByIdAndUpdate(block.taskId, { status: 'scheduled', scheduledDate: date });
+        }
+      }
+
+      return { schedule, message: `✅ Schedule updated with ${formattedBlocks.length} blocks.` };
+    }
+
+    case 'add_commitment': {
+      const commitment = await Commitment.create({
+        userId,
+        title: args.title,
+        startTime: args.startTime,
+        endTime: args.endTime,
+        isFixed: true,
+        recurrence: {
+          type: 'none',
+          specificDate: date,
+        },
+        notes: args.notes || '',
+      });
+      return { commitment, message: `Commitment "${commitment.title}" (${args.startTime} - ${args.endTime}) added.` };
+    }
+
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -402,14 +512,15 @@ async function runAgent(userId, userMessage, date) {
 
   const systemPrompt = `You are an AI daily planning assistant. Your job is to help the user plan, manage, and adapt their daily schedule.
 
-Key behaviors:
-- When the user gives you tasks, USE the add_task tool for each one, then generate_daily_schedule to propose a schedule.
+CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
+- Whenever the user asks for or agrees to specific timings (e.g. "DSA from 10:30 PM", "take a walk from 10:00 to 10:30", "push bedtime to 2 AM"), you MUST call the set_schedule_blocks tool with the actual block objects (title, startTime, endTime, durationMinutes, type, taskId if matching an existing task).
+- NEVER just print a markdown schedule table in your text reply without calling set_schedule_blocks or generate_daily_schedule. If you do not call the tool, the database and user's visual timeline will NOT update!
+- When the user confirms with "yes", "lock it in", or asks to commit, call set_schedule_blocks with isCommitted: true or call commit_schedule.
+- When the user mentions fixed events (walks, meetings, dinners), use add_commitment or include them as commitment/break blocks in set_schedule_blocks.
+- When the user gives you tasks, use add_task.
 - Always get_current_schedule before making modifications.
 - ALWAYS log_schedule_event BEFORE calling reschedule_day when reporting a miss/skip.
-- NEVER commit_schedule without the user explicitly asking to commit.
 - Be concise, friendly, and practical.
-- When generating a schedule, briefly explain key decisions.
-- When tasks don't fit, clearly explain what was left out and why.
 - Today's date is ${today}.`;
 
   // Build message history

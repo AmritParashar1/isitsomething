@@ -68,12 +68,9 @@ export default function ChatPanel({ date, onScheduleUpdate }) {
       const aiMsg = { role: 'model', content: res.data.message, timestamp: new Date().toISOString() };
       setMessages(prev => [...prev, aiMsg]);
 
-      // If the agent made tool calls that modify the schedule, refresh it
+      // If the agent made tool calls, immediately refresh the schedule timeline
       if (res.data.toolCalls?.length > 0) {
-        const scheduleTools = ['generate_daily_schedule', 'commit_schedule', 'reschedule_day', 'log_schedule_event'];
-        if (res.data.toolCalls.some(tc => scheduleTools.includes(tc.name))) {
-          onScheduleUpdate?.();
-        }
+        onScheduleUpdate?.();
       }
     } catch (err) {
       addToast(err.response?.data?.error || 'Agent error. Try again.', 'error');
