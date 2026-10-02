@@ -9,6 +9,33 @@ const { generateSchedule } = require('./scheduler');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const FALLBACK_MODEL = 'gemini-3-flash-preview';
+
+// Retry generateContent up to 3 times on 503, with exponential backoff.
+// Falls back to FALLBACK_MODEL if primary model keeps failing.
+async function generateWithRetry(primaryModel, fallbackModelId, params, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const model = attempt < maxRetries ? primaryModel
+      : genAI.getGenerativeModel({
+          model: fallbackModelId,
+          systemInstruction: primaryModel._requestOptions?.systemInstruction,
+          tools: primaryModel.tools,
+          generationConfig: primaryModel.generationConfig,
+        });
+    try {
+      return await (attempt < maxRetries ? primaryModel : model).generateContent(params);
+    } catch (err) {
+      const is503 = err.message && err.message.includes('503');
+      if (is503 && attempt < maxRetries) {
+        const delay = 1500 * Math.pow(2, attempt); // 1.5s, 3s, 6s
+        console.warn(`[Agent] 503 on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 // ─── Tool definitions (Gemini FunctionDeclaration format) ────────────────────
 
@@ -485,6 +512,14 @@ CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
     generationConfig: { temperature: 0.4 },
   });
 
+  // Fallback model used if primary gets repeated 503s
+  const fallbackModel = genAI.getGenerativeModel({
+    model: FALLBACK_MODEL,
+    systemInstruction,
+    tools: [{ functionDeclarations }],
+    generationConfig: { temperature: 0.4 },
+  });
+
   // Build the contents array for generateContent directly
   // (avoids SDK's internal 'function' role issues with startChat)
   const contents = conversation.messages
@@ -500,9 +535,22 @@ CRITICAL RULES FOR SCHEDULE MODIFICATIONS:
   // Save user message to conversation
   conversation.messages.push({ role: 'user', content: userMessage });
 
-  // Agentic loop using generateContent directly
+  // Agentic loop using generateContent directly (with retry + fallback)
+  let activeModel = model;
   while (true) {
-    const result = await model.generateContent({ contents });
+    let result;
+    try {
+      result = await activeModel.generateContent({ contents });
+    } catch (err) {
+      if (err.message && err.message.includes('503') && activeModel === model) {
+        console.warn('[Agent] Primary model unavailable, switching to fallback:', FALLBACK_MODEL);
+        activeModel = fallbackModel;
+        await new Promise(r => setTimeout(r, 1500));
+        result = await activeModel.generateContent({ contents });
+      } else {
+        throw err;
+      }
+    }
     const response = result.response;
     const candidate = response.candidates[0];
     const parts = candidate.content.parts;
