@@ -8,8 +8,8 @@ const User = require('../models/User');
 const { generateSchedule } = require('./scheduler');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-const FALLBACK_MODEL = 'gemini-3-flash-preview';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+const FALLBACK_MODEL = 'gemini-3.5-flash';
 
 // Retry generateContent up to 3 times on 503, with exponential backoff.
 // Falls back to FALLBACK_MODEL if primary model keeps failing.
